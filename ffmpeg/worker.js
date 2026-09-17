@@ -2,527 +2,512 @@
 /// <reference lib="esnext" />
 /// <reference lib="webworker" />
 
-import { FFMessageType } from "./const.js";
+import { CORE_URL, FFMessageType } from "./const.js";
 import {
-    ERROR_UNKNOWN_MESSAGE_TYPE,
-    ERROR_NOT_LOADED,
-    ERROR_IMPORT_FAILURE,
+ERROR_UNKNOWN_MESSAGE_TYPE,
+ERROR_NOT_LOADED,
+ERROR_IMPORT_FAILURE,
 } from "./errors.js";
 
-let ffmpeg = null;
+let ffmpeg;
 
-/*
- * ============================================================
- * FFmpeg 0.12.10
- * ============================================================
- *
- * core.js  : GitHub Pages
- * wasm     : jsDelivr 공식 패키지
- *
- * 중요:
- * - UMD core 사용
- * - ffmpeg-core.worker.js 사용 안 함
- * - core.js Blob 사용 안 함
- * - wasm Blob 사용 안 함
- */
+/* ============================================================
+FFmpeg Core 로드
 
-const CORE_URL =
-    "https://send2rohy.github.io/ffmpeg-blogger/ffmpeg/ffmpeg-core.js";
-
-const WASM_URL =
-    "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd/ffmpeg-core.wasm";
-
+* module Worker 전용
+* importScripts() 사용하지 않음
+* @ffmpeg/core 0.12.10 ESM 사용
+* ffmpeg-core.worker.js 사용하지 않음
+  ============================================================ */
 
 const load = async ({
-    coreURL: _coreURL,
-    wasmURL: _wasmURL,
-    workerURL: _workerURL,
+coreURL: _coreURL,
+wasmURL: _wasmURL,
 } = {}) => {
+const first = !ffmpeg;
 
-    const first = !ffmpeg;
-
+```
+try {
     const coreURL = _coreURL || CORE_URL;
-    const wasmURL = _wasmURL || WASM_URL;
 
-    /*
-     * 0.12.10 single-thread UMD에는
-     * ffmpeg-core.worker.js가 필요하지 않다.
-     */
-    const workerURL = _workerURL || "";
+    const wasmURL =
+        _wasmURL ||
+        coreURL.replace(/\.js$/i, ".wasm");
 
-    /*
-     * --------------------------------------------------------
-     * UMD core 로딩
-     * --------------------------------------------------------
-     *
-     * 이 worker가 classic worker라면 importScripts()
-     * module worker라면 fetch + eval 방식으로 UMD를 로드한다.
-     */
+    /* --------------------------------------------------------
+       ESM 방식으로 ffmpeg-core.js 로드
+       -------------------------------------------------------- */
 
-    try {
+    const module = await import(
+        /* webpackIgnore: true */
+        /* @vite-ignore */
+        coreURL
+    );
 
-        if (typeof importScripts === "function") {
+    const createFFmpegCore = module.default;
 
-            try {
-                importScripts(coreURL);
-            } catch (e) {
-                console.warn(
-                    "[FFmpeg] importScripts 실패:",
-                    e
-                );
-            }
-        }
-
-        /*
-         * UMD 파일이 정상적으로 로드되면
-         * createFFmpegCore가 전역에 생성된다.
-         */
-        if (typeof self.createFFmpegCore !== "function") {
-
-            /*
-             * module worker에서는 importScripts가 사용할 수 없으므로
-             * core.js를 직접 받아서 실행한다.
-             */
-            const response = await fetch(coreURL, {
-                cache: "no-store",
-            });
-
-            if (!response.ok) {
-                throw new Error(
-                    `ffmpeg-core.js HTTP ${response.status}`
-                );
-            }
-
-            const source = await response.text();
-
-            /*
-             * UMD 파일을 Worker 전역 환경에서 실행.
-             */
-            const runCore = new Function(
-                source + "\n//# sourceURL=" + coreURL
-            );
-
-            runCore();
-        }
-
-    } catch (e) {
-
-        console.error(
-            "[FFmpeg] core.js 로딩 실패:",
-            e
-        );
-
-        throw new Error(
-            "ffmpeg-core.js 로딩 실패: " +
-            (e && e.message ? e.message : String(e))
-        );
-    }
-
-
-    if (typeof self.createFFmpegCore !== "function") {
-
+    if (!createFFmpegCore) {
         throw ERROR_IMPORT_FAILURE;
     }
 
+    /* --------------------------------------------------------
+       WASM 위치 전달
+       -------------------------------------------------------- */
+
+    const config = {
+        wasmURL,
+    };
 
     /*
-     * --------------------------------------------------------
-     * FFmpeg Core 생성
-     * --------------------------------------------------------
-     *
-     * mainScriptUrlOrBlob에 coreURL과 wasmURL을 전달한다.
-     *
-     * 0.12 계열에서 locateFile 문제를 피하기 위해
-     * 공식 worker 구조에서 사용하는 URL encoding 방식을 유지한다.
+     * FFmpeg core 내부에서 locateFile()이
+     * WASM 위치를 정확하게 찾을 수 있도록
+     * core URL 뒤에 설정값을 전달한다.
      */
+    const encodedConfig = btoa(
+        JSON.stringify(config)
+    );
 
-    try {
+    ffmpeg = await createFFmpegCore({
+        mainScriptUrlOrBlob:
+            `${coreURL}#${encodedConfig}`,
+    });
 
-        const config = {
-            wasmURL: wasmURL,
-        };
-
-        /*
-         * single-thread에서는 workerURL이 필요 없다.
-         */
-
-        const encodedConfig = btoa(
-            JSON.stringify(config)
-        );
-
-        ffmpeg = await self.createFFmpegCore({
-
-            mainScriptUrlOrBlob:
-                `${coreURL}#${encodedConfig}`,
-
-        });
-
-    } catch (e) {
-
-        console.error(
-            "[FFmpeg] createFFmpegCore 실패:",
-            e
-        );
-
-        throw new Error(
-            "FFmpeg Core 초기화 실패: " +
-            (e && e.message ? e.message : String(e))
-        );
-    }
-
-
-    /*
-     * --------------------------------------------------------
-     * Logger
-     * --------------------------------------------------------
-     */
+    /* --------------------------------------------------------
+       로그
+       -------------------------------------------------------- */
 
     ffmpeg.setLogger((data) => {
-
         self.postMessage({
             type: FFMessageType.LOG,
             data,
         });
-
     });
 
-
-    /*
-     * --------------------------------------------------------
-     * Progress
-     * --------------------------------------------------------
-     */
+    /* --------------------------------------------------------
+       진행률
+       -------------------------------------------------------- */
 
     ffmpeg.setProgress((data) => {
-
         self.postMessage({
             type: FFMessageType.PROGRESS,
             data,
         });
-
     });
 
-
     return first;
+
+} catch (error) {
+
+    console.error(
+        "[FFmpeg Worker] Core load error:",
+        error
+    );
+
+    throw error;
+}
+```
+
 };
 
-
-/*
- * ============================================================
- * EXEC
- * ============================================================
- */
+/* ============================================================
+EXEC
+============================================================ */
 
 const exec = ({
-    args,
-    timeout = -1,
+args,
+timeout = -1,
 }) => {
 
-    ffmpeg.setTimeout(timeout);
+```
+ffmpeg.setTimeout(timeout);
 
-    ffmpeg.exec(...args);
+ffmpeg.exec(...args);
 
-    const ret = ffmpeg.ret;
+const ret = ffmpeg.ret;
 
-    ffmpeg.reset();
+ffmpeg.reset();
 
-    return ret;
+return ret;
+```
+
 };
 
-
-/*
- * ============================================================
- * FILE SYSTEM
- * ============================================================
- */
+/* ============================================================
+FILE SYSTEM
+============================================================ */
 
 const writeFile = ({
-    path,
-    data,
+path,
+data,
 }) => {
 
-    ffmpeg.FS.writeFile(path, data);
+```
+ffmpeg.FS.writeFile(
+    path,
+    data
+);
 
-    return true;
+return true;
+```
+
 };
-
 
 const readFile = ({
-    path,
-    encoding,
+path,
+encoding,
 }) => {
 
-    return ffmpeg.FS.readFile(
-        path,
-        { encoding }
-    );
-};
+```
+return ffmpeg.FS.readFile(
+    path,
+    { encoding }
+);
+```
 
+};
 
 const deleteFile = ({
-    path,
+path,
 }) => {
 
-    ffmpeg.FS.unlink(path);
+```
+ffmpeg.FS.unlink(path);
 
-    return true;
+return true;
+```
+
 };
-
 
 const rename = ({
-    oldPath,
-    newPath,
+oldPath,
+newPath,
 }) => {
 
-    ffmpeg.FS.rename(
-        oldPath,
-        newPath
-    );
+```
+ffmpeg.FS.rename(
+    oldPath,
+    newPath
+);
 
-    return true;
+return true;
+```
+
 };
-
 
 const createDir = ({
-    path,
+path,
 }) => {
 
-    ffmpeg.FS.mkdir(path);
+```
+ffmpeg.FS.mkdir(path);
 
-    return true;
+return true;
+```
+
 };
-
 
 const listDir = ({
-    path,
+path,
 }) => {
 
-    const names = ffmpeg.FS.readdir(path);
+```
+const names =
+    ffmpeg.FS.readdir(path);
 
-    const nodes = [];
+const nodes = [];
 
-    for (const name of names) {
+for (const name of names) {
 
-        const stat =
-            ffmpeg.FS.stat(
-                `${path}/${name}`
-            );
+    const stat =
+        ffmpeg.FS.stat(
+            `${path}/${name}`
+        );
 
-        const isDir =
-            ffmpeg.FS.isDir(
-                stat.mode
-            );
+    const isDir =
+        ffmpeg.FS.isDir(stat.mode);
 
-        nodes.push({
-            name,
-            isDir,
-        });
-    }
+    nodes.push({
+        name,
+        isDir,
+    });
+}
 
-    return nodes;
+return nodes;
+```
+
 };
-
 
 const deleteDir = ({
-    path,
+path,
 }) => {
 
-    ffmpeg.FS.rmdir(path);
+```
+ffmpeg.FS.rmdir(path);
 
-    return true;
+return true;
+```
+
 };
 
+/* ============================================================
+MOUNT
+============================================================ */
 
 const mount = ({
-    fsType,
-    options,
-    mountPoint,
+fsType,
+options,
+mountPoint,
 }) => {
 
-    const str = fsType;
+```
+const str = fsType;
 
-    const fs =
-        ffmpeg.FS.filesystems[str];
+const fs =
+    ffmpeg.FS.filesystems[str];
 
-    if (!fs) {
-        return false;
-    }
+if (!fs) {
+    return false;
+}
 
-    ffmpeg.FS.mount(
-        fs,
-        options,
-        mountPoint
-    );
+ffmpeg.FS.mount(
+    fs,
+    options,
+    mountPoint
+);
 
-    return true;
+return true;
+```
+
 };
-
 
 const unmount = ({
-    mountPoint,
+mountPoint,
 }) => {
 
-    ffmpeg.FS.unmount(
-        mountPoint
-    );
+```
+ffmpeg.FS.unmount(
+    mountPoint
+);
 
-    return true;
+return true;
+```
+
 };
 
-
-/*
- * ============================================================
- * MESSAGE HANDLER
- * ============================================================
- */
+/* ============================================================
+MESSAGE HANDLER
+============================================================ */
 
 self.onmessage = async ({
-    data: {
-        id,
-        type,
-        data: _data,
-    },
+data: {
+id,
+type,
+data: _data,
+},
 }) => {
 
-    const trans = [];
+```
+const trans = [];
 
-    let data;
+let data;
 
-    try {
+try {
 
-        if (
-            type !== FFMessageType.LOAD &&
-            !ffmpeg
-        ) {
-            throw ERROR_NOT_LOADED;
-        }
+    /* ------------------------------------------------------
+       LOAD 이외의 명령은 FFmpeg가 먼저 로드되어야 한다.
+       ------------------------------------------------------ */
 
-
-        switch (type) {
-
-            case FFMessageType.LOAD:
-
-                data = await load(
-                    _data || {}
-                );
-
-                break;
-
-
-            case FFMessageType.EXEC:
-
-                data = exec(_data);
-
-                break;
-
-
-            case FFMessageType.WRITE_FILE:
-
-                data = writeFile(_data);
-
-                break;
-
-
-            case FFMessageType.READ_FILE:
-
-                data = readFile(_data);
-
-                break;
-
-
-            case FFMessageType.DELETE_FILE:
-
-                data = deleteFile(_data);
-
-                break;
-
-
-            case FFMessageType.RENAME:
-
-                data = rename(_data);
-
-                break;
-
-
-            case FFMessageType.CREATE_DIR:
-
-                data = createDir(_data);
-
-                break;
-
-
-            case FFMessageType.LIST_DIR:
-
-                data = listDir(_data);
-
-                break;
-
-
-            case FFMessageType.DELETE_DIR:
-
-                data = deleteDir(_data);
-
-                break;
-
-
-            case FFMessageType.MOUNT:
-
-                data = mount(_data);
-
-                break;
-
-
-            case FFMessageType.UNMOUNT:
-
-                data = unmount(_data);
-
-                break;
-
-
-            default:
-
-                throw ERROR_UNKNOWN_MESSAGE_TYPE;
-        }
-
-
-    } catch (e) {
-
-        console.error(
-            "[FFmpeg Worker ERROR]",
-            e
-        );
-
-        self.postMessage({
-
-            id,
-
-            type: FFMessageType.ERROR,
-
-            data:
-                e && e.message
-                    ? e.message
-                    : String(e),
-
-        });
-
-        return;
+    if (
+        type !== FFMessageType.LOAD &&
+        !ffmpeg
+    ) {
+        throw ERROR_NOT_LOADED;
     }
 
 
-    if (data instanceof Uint8Array) {
+    switch (type) {
 
-        trans.push(
-            data.buffer
-        );
+        /* ==================================================
+           LOAD
+           ================================================== */
+
+        case FFMessageType.LOAD:
+
+            data =
+                await load(_data);
+
+            break;
+
+
+        /* ==================================================
+           EXEC
+           ================================================== */
+
+        case FFMessageType.EXEC:
+
+            data =
+                exec(_data);
+
+            break;
+
+
+        /* ==================================================
+           WRITE FILE
+           ================================================== */
+
+        case FFMessageType.WRITE_FILE:
+
+            data =
+                writeFile(_data);
+
+            break;
+
+
+        /* ==================================================
+           READ FILE
+           ================================================== */
+
+        case FFMessageType.READ_FILE:
+
+            data =
+                readFile(_data);
+
+            break;
+
+
+        /* ==================================================
+           DELETE FILE
+           ================================================== */
+
+        case FFMessageType.DELETE_FILE:
+
+            data =
+                deleteFile(_data);
+
+            break;
+
+
+        /* ==================================================
+           RENAME
+           ================================================== */
+
+        case FFMessageType.RENAME:
+
+            data =
+                rename(_data);
+
+            break;
+
+
+        /* ==================================================
+           CREATE DIR
+           ================================================== */
+
+        case FFMessageType.CREATE_DIR:
+
+            data =
+                createDir(_data);
+
+            break;
+
+
+        /* ==================================================
+           LIST DIR
+           ================================================== */
+
+        case FFMessageType.LIST_DIR:
+
+            data =
+                listDir(_data);
+
+            break;
+
+
+        /* ==================================================
+           DELETE DIR
+           ================================================== */
+
+        case FFMessageType.DELETE_DIR:
+
+            data =
+                deleteDir(_data);
+
+            break;
+
+
+        /* ==================================================
+           MOUNT
+           ================================================== */
+
+        case FFMessageType.MOUNT:
+
+            data =
+                mount(_data);
+
+            break;
+
+
+        /* ==================================================
+           UNMOUNT
+           ================================================== */
+
+        case FFMessageType.UNMOUNT:
+
+            data =
+                unmount(_data);
+
+            break;
+
+
+        /* ==================================================
+           UNKNOWN
+           ================================================== */
+
+        default:
+
+            throw ERROR_UNKNOWN_MESSAGE_TYPE;
     }
 
+} catch (error) {
 
-    self.postMessage(
-        {
-            id,
-            type,
-            data,
-        },
-        trans
+    console.error(
+        "[FFmpeg Worker ERROR]",
+        error
     );
+
+    self.postMessage({
+        id,
+        type: FFMessageType.ERROR,
+        data: error?.toString
+            ? error.toString()
+            : String(error),
+    });
+
+    return;
+}
+
+
+/* ==========================================================
+   Transferable 처리
+   ========================================================== */
+
+if (
+    data instanceof Uint8Array
+) {
+    trans.push(
+        data.buffer
+    );
+}
+
+
+self.postMessage(
+    {
+        id,
+        type,
+        data,
+    },
+    trans
+);
+```
+
 };
