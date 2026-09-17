@@ -27,7 +27,7 @@ let ffmpeg = null;
  */
 
 const CORE_URL =
-    "https://YOUR-USERNAME.github.io/ffmpeg-blogger/ffmpeg/ffmpeg-core.js";
+    "https://send2rohy.github.io/ffmpeg-blogger/ffmpeg/ffmpeg-core.js";
 
 const WASM_URL =
     "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd/ffmpeg-core.wasm";
